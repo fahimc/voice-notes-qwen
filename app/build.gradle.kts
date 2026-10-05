@@ -40,6 +40,7 @@ val copyOpenmpLibs by tasks.registering {
 android {
     namespace = "com.qwen.tts.android"
     compileSdk = 36
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.qwen.tts.android"

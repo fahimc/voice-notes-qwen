@@ -1260,7 +1260,6 @@ private fun VoicesScreen(viewModel: MainViewModel) {
     }
 }
 
-@Composable
 private fun shareGeneration(context: android.content.Context, generation: GenerationEntity) {
     val audioFile = File(generation.wavPath)
     check(audioFile.isFile) { "Audio file is no longer available" }
@@ -1279,6 +1278,7 @@ private fun shareGeneration(context: android.content.Context, generation: Genera
     context.startActivity(Intent.createChooser(sendIntent, "Send voice note"))
 }
 
+@Composable
 private fun HistoryScreen(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsState()
     val generations by viewModel.generations.collectAsState()
