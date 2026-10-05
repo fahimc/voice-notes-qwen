@@ -2,6 +2,7 @@ package com.qwen.tts.android
 
 import android.Manifest
 import android.app.Application
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
@@ -86,6 +88,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -672,7 +675,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun suggestedExportFileName(generation: GenerationEntity): String {
         val formatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.US)
-        return "qwen3-tts-export-${LocalDateTime.now().format(formatter)}-${generation.generationId}.wav"
+        return "voice-note-${LocalDateTime.now().format(formatter)}-${generation.generationId}.wav"
     }
 
     fun exportGenerationToUri(generation: GenerationEntity, uri: Uri) {
@@ -1258,9 +1261,28 @@ private fun VoicesScreen(viewModel: MainViewModel) {
 }
 
 @Composable
+private fun shareGeneration(context: android.content.Context, generation: GenerationEntity) {
+    val audioFile = File(generation.wavPath)
+    check(audioFile.isFile) { "Audio file is no longer available" }
+    val audioUri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        audioFile,
+    )
+    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+        type = "audio/wav"
+        putExtra(Intent.EXTRA_STREAM, audioUri)
+        putExtra(Intent.EXTRA_SUBJECT, "Voice note")
+        clipData = android.content.ClipData.newUri(context.contentResolver, "Voice note", audioUri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(sendIntent, "Send voice note"))
+}
+
 private fun HistoryScreen(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsState()
     val generations by viewModel.generations.collectAsState()
+    val context = LocalContext.current
     var pendingExport by remember { mutableStateOf<GenerationEntity?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("audio/wav"),
@@ -1322,6 +1344,21 @@ private fun HistoryScreen(viewModel: MainViewModel) {
                             Icon(Icons.Default.MoreVert, contentDescription = "More")
                         }
                         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Share") },
+                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                                onClick = {
+                                    menuExpanded = false
+                                    runCatching { shareGeneration(context, generation) }
+                                        .onFailure { throwable ->
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                throwable.message ?: "Could not share audio",
+                                                android.widget.Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
+                                },
+                            )
                             DropdownMenuItem(
                                 text = { Text("Export") },
                                 leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },

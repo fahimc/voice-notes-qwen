@@ -1,99 +1,50 @@
-# Qwen3 TTS Android
+# Voice Notes
 
-Android app for local, on-device text-to-speech with Qwen3-TTS and
-`qwen3-tts.cpp`.
+An Android app for recording a voice sample, creating a local voice profile, and turning text into audio notes with Qwen3-TTS. Generated WAV notes stay on the phone until you choose to export or share one.
 
-Qwen3 TTS Android runs the speech model on the device, stores generated audio
-locally, and provides a compact workflow for creating voice profiles from
-microphone recordings.
+## What it does
 
-## Screenshots
-
-| Studio | Voices |
-| --- | --- |
-| ![Studio screenshot](docs/screenshots/studio.jpg) | ![Voices screenshot](docs/screenshots/voices.jpg) |
-
-| History | Settings |
-| --- | --- |
-| ![History screenshot](docs/screenshots/history.jpg) | ![Settings screenshot](docs/screenshots/settings.jpg) |
-
-## Features
-
-- On-device Qwen3-TTS synthesis through the `qwen3-tts.cpp` native runtime
-- Jetpack Compose UI with Studio, Voices, History, and Settings screens
-- Q4_K_M model download and loading from app-private storage
-- Voice profiles with microphone recording and speaker embedding extraction
-- Local generation history with playback, stop, delete, and WAV export
-- CPU runtime path for Android devices
-- Progress output with elapsed time, estimated audio length, and history-based ETA
-- Android launcher icon shared with Qwen TTS Studio
+- Record a voice sample and create a reusable voice profile on the device.
+- Write or paste text and generate speech in the selected voice.
+- Listen to results, then find them later in History.
+- Share a WAV through Android's share sheet (including WhatsApp when installed), or save it with Android's file picker.
+- Download and run the model locally; synthesis does not upload your text or voice recordings.
 
 ## Model
 
-The app uses this model package:
+The app uses **Qwen3-TTS 0.6B Base Q4_K_M** through [`qwen3-tts.cpp`](https://github.com/Danmoreng/qwen3-tts.cpp):
 
-- `qwen-tokenizer-12hz-Q4_K_M.gguf`
 - `qwen-talker-0.6b-base-Q4_K_M.gguf`
+- `qwen-tokenizer-12hz-Q4_K_M.gguf`
 
-Model files are downloaded from
-[`Serveurperso/Qwen3-TTS-GGUF`](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF)
-into the app-private files directory.
+The two files total about 884 MB and are downloaded from [Serveurperso/Qwen3-TTS-GGUF](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF) to app-private storage on first setup. The APK does not bundle model weights. Ensure the phone has enough free storage and memory before downloading and loading the model.
 
 ## Requirements
 
-- Android Studio or a local Android SDK installation
-- Android NDK through the SDK manager
-- JDK 17
-- An arm64 Android device, Android 12 / API 31 or newer
+- Android 12 or newer, on an `arm64-v8a` device.
+- Around 900 MB free for the model download, plus additional working memory/storage while running it.
+- Microphone permission to record a voice profile.
+- Android Studio or Android SDK, NDK, CMake, and JDK 17 to build.
 
-The native build targets `arm64-v8a`.
+## Build locally
 
-## Build
-
-Initialize submodules:
+Initialize the native runtime submodules and build the release APK:
 
 ```powershell
 git submodule update --init --recursive
+./gradlew.bat :app:assembleRelease
 ```
 
-Build a debug APK:
+The APK is written to `app/build/outputs/apk/release/app-release.apk`. The release build is signed with the local Android debug key by default so it can be installed directly; create and configure your own release signing key before distributing an update that must preserve an existing installation.
 
-```powershell
-.\gradlew.bat :app:assembleDebug
-```
+## GitHub release
 
-Build a release APK:
+Build the APK locally with the command above, create a version tag, and attach the APK to a GitHub release. This repository does not use GitHub Actions.
 
-```powershell
-.\gradlew.bat :app:assembleRelease
-```
+## Project notes
 
-APK outputs:
+- `app/` contains the Android UI, recorder, local history, share/export flow, and JNI bridge.
+- `external/qwen3-tts.cpp/` is a Git submodule; its `ggml` dependency is nested below it.
+- App source is MIT licensed. The model weights and native runtime retain their own upstream licenses and terms; see their linked repositories and model card before redistribution.
 
-```text
-app/build/outputs/apk/debug/app-debug.apk
-app/build/outputs/apk/release/app-release.apk
-```
-
-## Install On A Device
-
-With a device connected through ADB:
-
-```powershell
-adb install -r app\build\outputs\apk\release\app-release.apk
-```
-
-On first launch, open Settings and download the Q4_K_M model package.
-
-## Repository Layout
-
-```text
-app/                         Android app, Compose UI, JNI wrapper
-app/src/main/cpp/            Android CMake integration
-app/src/main/java/.../data   Recorder and Room database
-external/qwen3-tts.cpp       Native Qwen3-TTS runtime submodule
-```
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+The app began from [Danmoreng/qwen3-tts-android](https://github.com/Danmoreng/qwen3-tts-android), with attribution retained under its MIT license.

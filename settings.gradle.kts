@@ -20,6 +20,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Qwen3TtsAndroid"
+rootProject.name = "VoiceNotesQwen"
 include(":app")
 
