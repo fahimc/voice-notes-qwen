@@ -103,6 +103,7 @@ import com.qwen.tts.android.data.db.VoiceProfileEntity
 import com.qwen.tts.android.ui.theme.QwenTtsTheme
 import com.qwen.tts.studio.engine.QwenEngine
 import java.io.File
+import java.io.FileInputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -118,6 +119,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private val GGUF_MAGIC = byteArrayOf('G'.code.toByte(), 'G'.code.toByte(), 'U'.code.toByte(), 'F'.code.toByte())
+private const val MIN_VOICE_SAMPLE_MILLIS = 3_000L
 
 private data class ModelFile(
     val name: String,
@@ -341,11 +345,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun downloadModel() {
+    fun downloadModel(forceRedownload: Boolean = false) {
         if (_uiState.value.downloading) return
         viewModelScope.launch {
             val variant = selectedVariant()
-            startBusy(status = "Preparing model download", downloading = true)
+            if (forceRedownload) {
+                engine?.close()
+                engine = null
+                variant.files.forEach { file ->
+                    runCatching { File(modelDir, file.name).delete() }
+                    runCatching { File(modelDir, "${file.name}.download").delete() }
+                }
+                _uiState.update { it.copy(loaded = false, modelReady = false) }
+            }
+            startBusy(
+                status = if (forceRedownload) "Replacing model files" else "Preparing model download",
+                downloading = true,
+            )
             _uiState.update {
                 it.copy(downloadProgress = 0f, downloadBytes = 0L, downloadTotalBytes = variant.totalBytes)
             }
@@ -353,7 +369,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     modelDir.mkdirs()
-                    downloadFiles(variant)
+                    downloadFiles(variant, forceRedownload)
                 }
             }
 
@@ -410,8 +426,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         it.copy(
                             busy = false,
                             loaded = false,
+                            modelReady = isModelReady(selectedVariant()),
                             status = "Load failed",
-                            error = throwable.message ?: "Load failed",
+                            error = "${throwable.message ?: "Load failed"} If the model was already downloaded, use Re-download model in Settings.",
                         )
                     }
                 },
@@ -522,6 +539,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopVoiceRecordingAndCreate(name: String) {
         val trimmedName = name.trim().ifBlank { "Voice ${voices.value.size + 1}" }
         val result = recorder.stop() ?: return
+        if (result.durationMillis < MIN_VOICE_SAMPLE_MILLIS) {
+            result.file.delete()
+            _uiState.update {
+                it.copy(error = "Record at least 3 seconds of clear speech before creating a voice.")
+            }
+            return
+        }
         viewModelScope.launch {
             startBusy(status = "Creating voice embedding")
             val created = runCatching {
@@ -845,15 +869,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun isModelReady(variant: ModelVariant): Boolean =
         variant.files.all { file ->
-            val local = File(modelDir, file.name)
-            local.isFile && local.length() >= file.sizeBytes
+            isValidModelFile(File(modelDir, file.name), file)
         }
 
-    private fun downloadFiles(variant: ModelVariant) {
+    private fun isValidModelFile(local: File, model: ModelFile): Boolean {
+        if (!local.isFile || local.length() < model.sizeBytes) return false
+        return runCatching {
+            FileInputStream(local).use { input ->
+                val header = ByteArray(GGUF_MAGIC.size)
+                var offset = 0
+                while (offset < header.size) {
+                    val read = input.read(header, offset, header.size - offset)
+                    if (read < 0) return false
+                    offset += read
+                }
+                header.contentEquals(GGUF_MAGIC)
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun downloadFiles(variant: ModelVariant, forceRedownload: Boolean) {
         var completedBytes = 0L
         variant.files.forEachIndexed { index, file ->
             val target = File(modelDir, file.name)
-            if (target.isFile && target.length() >= file.sizeBytes) {
+            if (!forceRedownload && isValidModelFile(target, file)) {
                 completedBytes += file.sizeBytes
                 return@forEachIndexed
             }
@@ -865,36 +904,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 readTimeout = 30_000
             }
 
-            connection.inputStream.use { input ->
-                temp.outputStream().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    var fileBytes = 0L
-                    var lastUpdate = 0L
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        output.write(buffer, 0, read)
-                        fileBytes += read
-                        val now = System.currentTimeMillis()
-                        if (now - lastUpdate > 250L) {
-                            lastUpdate = now
-                            val total = completedBytes + fileBytes
-                            _uiState.update {
-                                it.copy(
-                                    downloadBytes = total,
-                                    downloadProgress = total.toFloat() / variant.totalBytes.toFloat(),
-                                    status = "Downloading ${index + 1}/${variant.files.size}: ${file.name}",
-                                )
+            try {
+                val responseCode = connection.responseCode
+                if (responseCode !in 200..299) {
+                    error("Model server returned HTTP $responseCode for ${file.name}")
+                }
+                connection.inputStream.use { input ->
+                    temp.outputStream().use { output ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        var fileBytes = 0L
+                        var lastUpdate = 0L
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            fileBytes += read
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdate > 250L) {
+                                lastUpdate = now
+                                val total = completedBytes + fileBytes
+                                _uiState.update {
+                                    it.copy(
+                                        downloadBytes = total,
+                                        downloadProgress = total.toFloat() / variant.totalBytes.toFloat(),
+                                        status = "Downloading ${index + 1}/${variant.files.size}: ${file.name}",
+                                    )
+                                }
                             }
                         }
                     }
                 }
+            } finally {
+                connection.disconnect()
             }
-            connection.disconnect()
 
-            if (temp.length() < file.sizeBytes) {
+            if (temp.length() < file.sizeBytes || !isValidModelFile(temp, file)) {
                 temp.delete()
-                error("Downloaded ${file.name} is incomplete")
+                error("Downloaded ${file.name} is incomplete or is not a valid GGUF model. Please try again.")
             }
             if (target.exists() && !target.delete()) {
                 temp.delete()
@@ -1183,6 +1229,9 @@ private fun VoicesScreen(viewModel: MainViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
+        state.error?.let { message ->
+            Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+        }
         ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1565,7 +1614,7 @@ private fun LanguageDropdown(
 @Composable
 private fun ModelPanel(
     state: QwenTtsUiState,
-    onDownload: () -> Unit,
+    onDownload: (Boolean) -> Unit,
     onLoad: () -> Unit,
 ) {
     val selectedVariant = QwenModel.variantById(state.selectedModelId)
@@ -1592,13 +1641,13 @@ private fun ModelPanel(
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
-                    onClick = onDownload,
-                    enabled = !state.busy && !state.modelReady,
+                    onClick = { onDownload(state.modelReady) },
+                    enabled = !state.busy,
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text(if (state.modelReady) "Model ready" else "Download model")
+                    Text(if (state.modelReady) "Re-download" else "Download model")
                 }
                 OutlinedButton(
                     onClick = onLoad,
