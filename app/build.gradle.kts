@@ -46,8 +46,8 @@ android {
         applicationId = "com.qwen.tts.android"
         minSdk = 31
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -72,6 +72,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libc++_shared.so"
+        }
     }
 
     externalNativeBuild {
@@ -116,6 +122,7 @@ kotlin {
 }
 
 dependencies {
+    implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.8")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
