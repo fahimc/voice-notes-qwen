@@ -5,9 +5,14 @@
 /app/build/
 /app/.cxx/
 /app/.externalNativeBuild/
+/app/prebuilt-native/
+/.gradle-user-home/
+/build-local.ps1
+/.android/
 /captures/
 /local.properties
 /models/
 *.iml
+*.apk
 .DS_Store
 

@@ -9,7 +9,9 @@ An Android app for recording a voice sample, creating a local voice profile, and
 - Listen to results, then find them later in History.
 - Share a WAV through Android's share sheet (including WhatsApp when installed), or save it with Android's file picker.
 - Download and run the model locally; synthesis does not upload your text or voice recordings.
-- Choose between Qwen voice cloning and a fixed-speaker Bengali voice model during setup.
+- Choose between Qwen voice cloning and a 16-speaker Bengali voice model during setup.
+- Choose male or female Bengali voices, or pick from the other built-in Bengali speakers.
+- Enter Bengali directly or translate English to Bengali on-device before speech generation.
 
 ## Model
 
@@ -20,12 +22,12 @@ The default option is **Qwen3-TTS 0.6B Base Q4_K_M** through [`qwen3-tts.cpp`](h
 
 The two files total about 884 MB and are downloaded from [Serveurperso/Qwen3-TTS-GGUF](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF) to app-private storage on first setup. This model supports voice cloning.
 
-The optional Bengali model is the 114 MB [Coqui Bengali female VITS model](https://huggingface.co/csukuangfj/vits-coqui-bn-custom_female), run locally with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It speaks Bengali with its built-in female voice; it does not support voice cloning. The model is downloaded only if selected. The APK does not bundle model weights. Ensure the phone has enough free storage and memory before downloading and loading either model.
+The optional Bengali model is [Mimic 3 Bengali multi-speaker VITS](https://huggingface.co/csukuangfj/vits-mimic3-bn-multi_low), run locally with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It provides 16 built-in speaker IDs, including female and male choices in the app. It does not support voice cloning. If Bengali is selected, setup downloads and installs the speech model and the roughly 30 MB [Google ML Kit on-device English to Bengali translation model](https://developers.google.com/ml-kit/language/translation/android). Speech and translation run on the phone after setup. The APK does not bundle model weights. Ensure the phone has enough free storage and memory before downloading and loading either model.
 
 ## Requirements
 
 - Android 12 or newer, on an `arm64-v8a` device.
-- Around 900 MB free for Qwen or at least 120 MB for Bengali, plus additional working memory/storage while running the selected model.
+- Around 900 MB free for Qwen or at least 200 MB for Bengali speech and translation setup, plus additional working memory/storage while running the selected model.
 - Microphone permission to record a voice profile.
 - Android Studio or Android SDK, NDK, CMake, and JDK 17 to build.
 

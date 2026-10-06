@@ -102,12 +102,15 @@ import com.qwen.tts.android.data.db.QwenDatabase
 import com.qwen.tts.android.data.db.VoiceProfileEntity
 import com.qwen.tts.android.ui.theme.QwenTtsTheme
 import com.qwen.tts.studio.engine.BengaliTtsEngine
+import com.qwen.tts.studio.engine.BengaliTranslator
 import com.qwen.tts.studio.engine.QwenEngine
 import java.io.File
 import java.io.FileInputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -228,13 +231,16 @@ private object QwenModel {
 
 private object BengaliModel {
     const val id = "bengali_vits"
-    const val displayName = "Bengali · fixed female voice"
-    private const val baseUrl = "https://huggingface.co/csukuangfj/vits-coqui-bn-custom_female/resolve/main"
+    const val displayName = "Bengali · male and female voices"
     val files = listOf(
-        ModelFile("tokens.txt", "$baseUrl/tokens.txt?download=true", 100L),
-        ModelFile("model.onnx", "$baseUrl/model.onnx?download=true", 100_000_000L),
+        ModelFile(
+            "vits-mimic3-bn-multi_low.tar.bz2",
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-mimic3-bn-multi_low.tar.bz2",
+            10_000_000L,
+        ),
     )
-    const val estimatedBytes = 120_000_000L
+    const val estimatedBytes = 95_000_000L
+    const val readyMarker = "multi-speaker-ready"
 }
 
 private val speechModelOptions = listOf(
@@ -242,11 +248,33 @@ private val speechModelOptions = listOf(
     BengaliModel.id to BengaliModel.displayName,
 )
 
+private val bengaliSpeakerOptions = listOf(
+    0 to "Female · rm",
+    1 to "Male · 03042",
+    2 to "Speaker 3 · 00737",
+    3 to "Speaker 4 · 01232",
+    4 to "Speaker 5 · 02194",
+    5 to "Speaker 6 · 3108",
+    6 to "Speaker 7 · 3713",
+    7 to "Speaker 8 · 1010",
+    8 to "Speaker 9 · 00779",
+    9 to "Speaker 10 · 9169",
+    10 to "Speaker 11 · 4046",
+    11 to "Speaker 12 · 5958",
+    12 to "Speaker 13 · 01701",
+    13 to "Speaker 14 · 4811",
+    14 to "Speaker 15 · 0834",
+    15 to "Speaker 16 · 3958",
+)
+
 data class QwenTtsUiState(
     val text: String = DEFAULT_DEMO_TEXT,
     val selectedModelId: String = QwenModel.defaultVariant.id,
     val selectedBackendId: String = defaultBackendOption.id,
     val selectedVoiceId: String? = null,
+    val selectedBengaliSpeakerId: Int = 0,
+    val translateEnglishToBengali: Boolean = false,
+    val translatedText: String? = null,
     val activeBackendName: String? = null,
     val modelReady: Boolean = false,
     val loaded: Boolean = false,
@@ -286,7 +314,7 @@ data class QwenTtsUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val modelDir = File(application.filesDir, "qwen3-tts-models")
-    private val bengaliModelDir = File(application.filesDir, "bengali-vits-model")
+    private val bengaliModelDir = File(application.filesDir, "bengali-multispeaker-model")
     private val voiceDir = File(application.filesDir, "voices")
     private val generationDir = File(application.filesDir, "generations")
     private val preferences = application.getSharedPreferences("voice-notes-settings", Application.MODE_PRIVATE)
@@ -311,6 +339,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var engine: QwenEngine? = null
     private var bengaliEngine: BengaliTtsEngine? = null
+    private var bengaliTranslator: BengaliTranslator? = null
     private var generatedAudio: FloatArray? = null
     private var playJob: Job? = null
     private var operationTickerJob: Job? = null
@@ -323,7 +352,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateText(value: String) {
-        _uiState.update { it.copy(text = value) }
+        _uiState.update { it.copy(text = value, translatedText = null) }
     }
 
     fun updateCpuThreads(value: Int) {
@@ -341,6 +370,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(selectedVoiceId = voiceId) }
     }
 
+    fun selectBengaliSpeaker(speakerId: Int) {
+        if (_uiState.value.busy || speakerId !in 0..15) return
+        _uiState.update { it.copy(selectedBengaliSpeakerId = speakerId) }
+    }
+
+    fun setTranslateEnglishToBengali(enabled: Boolean) {
+        if (_uiState.value.busy) return
+        _uiState.update { it.copy(translateEnglishToBengali = enabled, translatedText = null) }
+    }
+
     fun clearSnackbarMessage() {
         _uiState.update { it.copy(snackbarMessage = null) }
     }
@@ -353,12 +392,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         engine = null
         bengaliEngine?.close()
         bengaliEngine = null
+        bengaliTranslator?.close()
+        bengaliTranslator = null
         generatedAudio = null
         val ready = isSelectedModelReady(selectedId)
         preferences.edit().putString("speech-model", selectedId).apply()
         _uiState.update {
             it.copy(
                 selectedModelId = selectedId,
+                translatedText = null,
                 text = when {
                     selectedId == BengaliModel.id && it.text == DEFAULT_DEMO_TEXT -> BENGALI_DEMO_TEXT
                     selectedId != BengaliModel.id && it.text == BENGALI_DEMO_TEXT -> DEFAULT_DEMO_TEXT
@@ -402,6 +444,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 engine = null
                 bengaliEngine?.close()
                 bengaliEngine = null
+                if (isBengaliSelected()) File(bengaliModelDir, BengaliModel.readyMarker).delete()
                 selectedModelFiles().forEach { file ->
                     val dir = selectedModelDir()
                     runCatching { File(dir, file.name).delete() }
@@ -496,6 +539,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (text.isEmpty() || _uiState.value.busy) return
         viewModelScope.launch {
             val bengaliSelected = isBengaliSelected()
+            val bengaliSpeaker = _uiState.value.selectedBengaliSpeakerId
+            val translateEnglish = bengaliSelected && _uiState.value.translateEnglishToBengali
             val variant = selectedVariant()
             val selectedVoice = if (bengaliSelected) null else _uiState.value.selectedVoiceId?.let { id -> voices.value.firstOrNull { it.voiceId == id } }
             val estimate = if (bengaliSelected) null else estimateSynthesisMillis(text)
@@ -505,7 +550,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.IO) {
                     if (bengaliSelected) {
                         val startedAt = SystemClock.elapsedRealtime()
-                        val output = ensureBengaliEngineLoaded().synthesize(text)
+                        val speechText = if (translateEnglish) {
+                            _uiState.update { it.copy(status = "Translating English to Bengali") }
+                            ensureBengaliTranslator().translate(text)
+                        } else text
+                        _uiState.update { it.copy(translatedText = if (translateEnglish) speechText else null, status = "Generating Bengali speech") }
+                        val output = ensureBengaliEngineLoaded().synthesize(speechText, bengaliSpeaker)
                         TtsSynthesisResult(
                             audio = output.samples,
                             sampleRate = output.sampleRate,
@@ -558,7 +608,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     stopBusyTicker()
                     generatedAudio = synthesisResult.audio
                     val sampleRate = synthesisResult.sampleRate.takeIf { it > 0 } ?: 24_000
-                    val voiceName = if (bengaliSelected) "Bengali built-in (female)" else selectedVoice?.name ?: "Default Voice"
+                    val voiceName = if (bengaliSelected) bengaliSpeakerOptions.firstOrNull { it.first == bengaliSpeaker }?.second ?: "Bengali speaker $bengaliSpeaker" else selectedVoice?.name ?: "Default Voice"
                     persistGeneratedAudio(text, synthesisResult.audio, sampleRate, voiceName, selectedVoice?.voiceId, synthesisResult.timeMillis)
                     _uiState.update {
                         it.copy(
@@ -945,10 +995,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun isSelectedModelReady(modelId: String = _uiState.value.selectedModelId): Boolean =
         if (modelId == BengaliModel.id) {
-            BengaliModel.files.all { file ->
-                val local = File(bengaliModelDir, file.name)
-                local.isFile && local.length() >= file.sizeBytes
-            }
+            File(bengaliModelDir, BengaliModel.readyMarker).isFile &&
+                bengaliModelDir.walkTopDown().any { it.isFile && it.extension == "onnx" && it.length() > 50_000_000L } &&
+                bengaliModelDir.walkTopDown().any { it.isFile && it.name == "tokens.txt" } &&
+                bengaliModelDir.walkTopDown().any { it.isDirectory && it.name == "espeak-ng-data" }
         } else {
             isModelReady(QwenModel.variantById(modelId))
         }
@@ -958,6 +1008,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return BengaliTtsEngine(bengaliModelDir, _uiState.value.selectedCpuThreads.coerceAtLeast(1))
             .also { bengaliEngine = it }
     }
+
+    private fun ensureBengaliTranslator(): BengaliTranslator =
+        bengaliTranslator ?: BengaliTranslator().also { bengaliTranslator = it }
 
     private fun downloadSelectedModel(variant: ModelVariant, forceRedownload: Boolean) {
         if (!isBengaliSelected()) {
@@ -979,10 +1032,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 connectTimeout = 30_000
                 readTimeout = 60_000
             }
+            var expectedBytes = file.sizeBytes
             try {
                 val responseCode = connection.responseCode
                 if (responseCode !in 200..299) error("Model server returned HTTP $responseCode for ${file.name}")
                 val responseSize = connection.contentLengthLong.takeIf { it > 0L } ?: file.sizeBytes
+                expectedBytes = maxOf(file.sizeBytes, responseSize)
                 connection.inputStream.use { input ->
                     temp.outputStream().use { output ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -1012,7 +1067,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 connection.disconnect()
             }
-            if (!temp.isFile || temp.length() < file.sizeBytes) {
+            if (!temp.isFile || temp.length() < expectedBytes) {
                 temp.delete()
                 error("Downloaded ${file.name} is incomplete. Please try again.")
             }
@@ -1026,6 +1081,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             completedBytes += target.length()
         }
+        if (!isSelectedModelReady(BengaliModel.id)) {
+            _uiState.update { it.copy(status = "Installing Bengali voices") }
+            val archive = File(bengaliModelDir, BengaliModel.files.single().name)
+            try {
+                extractBengaliModel(archive)
+            } catch (error: Exception) {
+                archive.delete()
+                throw error
+            }
+        }
+    }
+
+    private fun extractBengaliModel(archive: File) {
+        val root = bengaliModelDir.canonicalFile
+        val marker = File(root, BengaliModel.readyMarker)
+        marker.delete()
+        var extractedBytes = 0L
+        archive.inputStream().buffered().use { input ->
+            TarArchiveInputStream(BZip2CompressorInputStream(input)).use { tar ->
+                while (true) {
+                    val entry = tar.nextEntry ?: break
+                    val target = File(root, entry.name).canonicalFile
+                    check(target == root || target.path.startsWith(root.path + File.separator)) { "Invalid Bengali model archive path" }
+                    if (entry.isDirectory) {
+                        check(target.mkdirs() || target.isDirectory) { "Could not create model directory" }
+                    } else if (entry.isFile) {
+                        extractedBytes += entry.size
+                        check(extractedBytes < 250_000_000L) { "Bengali model archive is too large" }
+                        val parent = checkNotNull(target.parentFile)
+                        check(parent.mkdirs() || parent.isDirectory) { "Could not create model directory" }
+                        target.outputStream().use { output -> tar.copyTo(output) }
+                    }
+                }
+            }
+        }
+        check(root.walkTopDown().any { it.isFile && it.extension == "onnx" && it.length() > 50_000_000L }) { "Bengali speech model is missing" }
+        check(root.walkTopDown().any { it.isFile && it.name == "tokens.txt" }) { "Bengali speech tokens are missing" }
+        check(root.walkTopDown().any { it.isDirectory && it.name == "espeak-ng-data" }) { "Bengali pronunciation data is missing" }
+        marker.writeText("ready")
+        archive.delete()
     }
 
     private fun selectedVariant(): ModelVariant =
@@ -1063,6 +1158,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 engine = null
                 bengaliEngine?.close()
                 bengaliEngine = null
+                if (bengaliSelected) File(bengaliModelDir, BengaliModel.readyMarker).delete()
                 selectedModelFiles().forEach { file ->
                     val dir = selectedModelDir()
                     runCatching { File(dir, file.name).delete() }
@@ -1112,6 +1208,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.IO) {
                     if (bengaliSelected) {
                         ensureBengaliEngineLoaded()
+                        _uiState.update { it.copy(status = "Downloading English to Bengali translation model") }
+                        ensureBengaliTranslator().prepare()
                         "CPU" to _uiState.value.selectedCpuThreads
                     } else {
                         val native = ensureEngineLoaded(variant)
@@ -1283,6 +1381,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         engine?.close()
         engine = null
         bengaliEngine?.close()
+        bengaliTranslator?.close()
         bengaliEngine = null
         super.onCleared()
     }
@@ -1443,7 +1542,11 @@ private fun SetupScreen(viewModel: MainViewModel, onStart: (Boolean) -> Unit, on
         )
         Text("Let’s set up Voice Notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text(
-            "Start once to download and load the speech model. When setup finishes, you’ll go straight to the voice creation screen.",
+            if (bengaliSelected) {
+                "Start once to install the Bengali voices and English to Bengali translation. Then choose a voice."
+            } else {
+                "Start once to download and load the speech model. When setup finishes, you’ll go straight to the voice creation screen."
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1469,7 +1572,7 @@ private fun SetupScreen(viewModel: MainViewModel, onStart: (Boolean) -> Unit, on
                 Text(speechModelOptions.first { it.first == state.selectedModelId }.second, style = MaterialTheme.typography.bodyLarge)
                 Text(
                     if (bengaliSelected) {
-                        "About 114 MB • fixed female voice • Bengali text • runs offline • no voice cloning"
+                        "About 95 MB speech model plus a small on-device translation model • 16 Bengali speakers • no voice cloning"
                     } else {
                         "About 0.8 GB • downloads to this device • voice cloning available"
                     },
@@ -1531,19 +1634,30 @@ private fun StudioScreen(viewModel: MainViewModel) {
     val voices by viewModel.voices.collectAsState()
     var showVoicePicker by remember { mutableStateOf(false) }
     val bengaliSelected = state.selectedModelId == BengaliModel.id
-    val selectedVoiceName = if (bengaliSelected) "Built-in Bengali female voice"
+    val selectedVoiceName = if (bengaliSelected) bengaliSpeakerOptions.firstOrNull { it.first == state.selectedBengaliSpeakerId }?.second ?: "Bengali voice"
     else voices.firstOrNull { it.voiceId == state.selectedVoiceId }?.name ?: "Default Voice"
 
     if (showVoicePicker) {
-        VoicePickerSheet(
-            voices = voices,
-            selectedVoiceId = state.selectedVoiceId,
-            onDismiss = { showVoicePicker = false },
-            onVoiceSelected = { voiceId ->
-                viewModel.selectVoice(voiceId)
-                showVoicePicker = false
-            },
-        )
+        if (bengaliSelected) {
+            BengaliVoicePickerSheet(
+                selectedSpeakerId = state.selectedBengaliSpeakerId,
+                onDismiss = { showVoicePicker = false },
+                onVoiceSelected = { speakerId ->
+                    viewModel.selectBengaliSpeaker(speakerId)
+                    showVoicePicker = false
+                },
+            )
+        } else {
+            VoicePickerSheet(
+                voices = voices,
+                selectedVoiceId = state.selectedVoiceId,
+                onDismiss = { showVoicePicker = false },
+                onVoiceSelected = { voiceId ->
+                    viewModel.selectVoice(voiceId)
+                    showVoicePicker = false
+                },
+            )
+        }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -1562,10 +1676,11 @@ private fun StudioScreen(viewModel: MainViewModel) {
             ComposerPanel(
                 state = state,
                 selectedVoiceName = selectedVoiceName,
-                fixedVoice = bengaliSelected,
+                bengaliVoice = bengaliSelected,
                 onTextChange = viewModel::updateText,
-                onVoicePickerClick = { if (!state.busy && !bengaliSelected) showVoicePicker = true },
+                onVoicePickerClick = { if (!state.busy) showVoicePicker = true },
                 onLanguageChange = viewModel::updateLanguage,
+                onTranslateEnglishChange = viewModel::setTranslateEnglishToBengali,
             )
             if ((state.busy && !state.downloading) || state.sampleCount > 0) {
                 ResultPanel(
@@ -1628,8 +1743,15 @@ private fun VoicesScreen(viewModel: MainViewModel) {
         if (state.selectedModelId == BengaliModel.id) {
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Bengali voice", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("This model uses its built-in female voice. Voice recording and cloning are unavailable for Bengali.")
+                    Text("Bengali voices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Choose a male or female voice. More built-in speakers are available in Studio. Voice cloning is unavailable for Bengali.")
+                    bengaliSpeakerOptions.take(2).forEach { (id, label) ->
+                        FilterChip(
+                            selected = state.selectedBengaliSpeakerId == id,
+                            onClick = { viewModel.selectBengaliSpeaker(id) },
+                            label = { Text(label) },
+                        )
+                    }
                 }
             }
         } else ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
@@ -1860,10 +1982,11 @@ private fun SettingsScreen(viewModel: MainViewModel) {
 private fun ComposerPanel(
     state: QwenTtsUiState,
     selectedVoiceName: String,
-    fixedVoice: Boolean,
+    bengaliVoice: Boolean,
     onTextChange: (String) -> Unit,
     onVoicePickerClick: () -> Unit,
     onLanguageChange: (Int) -> Unit,
+    onTranslateEnglishChange: (Boolean) -> Unit,
 ) {
     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1878,7 +2001,7 @@ private fun ComposerPanel(
             )
             OutlinedButton(
                 onClick = onVoicePickerClick,
-                enabled = !state.busy && !fixedVoice,
+                enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Icon(Icons.Default.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -1888,14 +2011,57 @@ private fun ComposerPanel(
                     Text(selectedVoiceName, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            if (!fixedVoice) {
+            if (!bengaliVoice) {
                 LanguageDropdown(
                     selectedLanguageId = state.selectedLanguageId,
                     enabled = !state.busy,
                     onLanguageChange = onLanguageChange,
                 )
             } else {
-                Text("Bengali only · generated on this device", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Input language", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = !state.translateEnglishToBengali,
+                        onClick = { onTranslateEnglishChange(false) },
+                        enabled = !state.busy,
+                        label = { Text("Bengali text") },
+                    )
+                    FilterChip(
+                        selected = state.translateEnglishToBengali,
+                        onClick = { onTranslateEnglishChange(true) },
+                        enabled = !state.busy,
+                        label = { Text("English → Bengali") },
+                    )
+                }
+                if (state.translateEnglishToBengali) {
+                    Text("English text is translated on this device before speech generation. Translation by Google.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    state.translatedText?.let { translated -> Text(translated, style = MaterialTheme.typography.bodyMedium) }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BengaliVoicePickerSheet(
+    selectedSpeakerId: Int,
+    onDismiss: () -> Unit,
+    onVoiceSelected: (Int) -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("Choose Bengali voice", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            bengaliSpeakerOptions.forEach { (id, label) ->
+                VoicePickerItem(
+                    title = label,
+                    subtitle = "Built-in speaker ${id + 1}",
+                    selected = selectedSpeakerId == id,
+                    onClick = { onVoiceSelected(id) },
+                )
             }
         }
     }

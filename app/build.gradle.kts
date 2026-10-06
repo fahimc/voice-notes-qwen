@@ -7,6 +7,9 @@ plugins {
 val qwenOpenmp = providers.gradleProperty("qwen.openmp")
     .map { it.equals("true", ignoreCase = true) }
     .orElse(false)
+val qwenPrebuiltNative = providers.gradleProperty("qwen.prebuiltNative")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
 val qwenVulkan = providers.gradleProperty("qwen.vulkan")
     .map { it.equals("true", ignoreCase = true) }
     .orElse(false)
@@ -46,8 +49,8 @@ android {
         applicationId = "com.qwen.tts.android"
         minSdk = 31
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.3.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -80,24 +83,28 @@ android {
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
+    if (!qwenPrebuiltNative.get()) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+            }
         }
     }
 
-    defaultConfig {
-        externalNativeBuild {
-            cmake {
-                targets += listOf("qwen3_tts_jni")
-                arguments += listOf(
+    if (!qwenPrebuiltNative.get()) {
+        defaultConfig {
+            externalNativeBuild {
+                cmake {
+                    targets += listOf("qwen3_tts_jni")
+                    arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DQWEN3_ANDROID_OPENMP=${if (qwenOpenmp.get()) "ON" else "OFF"}",
                     "-DQWEN3_ANDROID_VULKAN=${if (qwenVulkan.get()) "ON" else "OFF"}",
                     "-DQWEN3_ANDROID_OPENCL=${if (qwenOpencl.get()) "ON" else "OFF"}",
                     "-DOpenCL_INCLUDE_DIR=${qwenOpenclSdkDir.get()}/OpenCL-Headers",
                     "-DOpenCL_LIBRARY=${qwenOpenclSdkDir.get()}/lib/arm64-v8a/libOpenCL.so",
-                )
+                    )
+                }
             }
         }
     }
@@ -105,6 +112,7 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(generatedOpenmpJniLibs.get().asFile)
+            if (qwenPrebuiltNative.get()) jniLibs.srcDir("prebuilt-native")
         }
     }
 }
@@ -123,6 +131,8 @@ kotlin {
 
 dependencies {
     implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.8")
+    implementation("com.google.mlkit:translate:17.0.3")
+    implementation("org.apache.commons:commons-compress:1.27.1")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
