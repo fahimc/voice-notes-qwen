@@ -9,6 +9,7 @@ An Android app for recording a voice sample, creating a local voice profile, and
 - Listen to results, then find them later in History.
 - Share a WAV through Android's share sheet (including WhatsApp when installed), or save it with Android's file picker.
 - Download and run the model locally; synthesis does not upload your text or voice recordings.
+- Save a generated voice note as a WAV file or share it directly from the result screen, including through WhatsApp when installed.
 - Qwen voice cloning installs automatically on first launch. Add the optional 16-speaker Bengali voice model from Studio or Settings and switch between installed models without downloading them again.
 - Choose male or female Bengali voices, or pick from the other built-in Bengali speakers.
 - Enter Bengali directly or translate English to Bengali on-device before speech generation.

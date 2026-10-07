@@ -290,6 +290,7 @@ data class QwenTtsUiState(
     val error: String? = null,
     val sampleRate: Int = 0,
     val sampleCount: Int = 0,
+    val currentGenerationId: Long? = null,
     val synthesisMillis: Long = 0,
     val playing: Boolean = false,
     val playingGenerationId: Long? = null,
@@ -346,6 +347,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var bengaliEngine: BengaliTtsEngine? = null
     private var bengaliTranslator: BengaliTranslator? = null
     private var generatedAudio: FloatArray? = null
+    private var currentGeneration: GenerationEntity? = null
     private var playJob: Job? = null
     private var operationTickerJob: Job? = null
     private var activeTrack: AudioTrack? = null
@@ -404,6 +406,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         bengaliTranslator?.close()
         bengaliTranslator = null
         generatedAudio = null
+        currentGeneration = null
         val ready = isSelectedModelReady(selectedId)
         preferences.edit().putString("speech-model", selectedId).apply()
         _uiState.update {
@@ -428,6 +431,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 downloadTotalBytes = selectedModelBytes(selectedId),
                 sampleRate = 0,
                 sampleCount = 0,
+                currentGenerationId = null,
                 synthesisMillis = 0,
                 synthesisFrames = 0,
                 tokenizeMillis = 0,
@@ -625,7 +629,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     generatedAudio = synthesisResult.audio
                     val sampleRate = synthesisResult.sampleRate.takeIf { it > 0 } ?: 24_000
                     val voiceName = if (bengaliSelected) bengaliSpeakerOptions.firstOrNull { it.first == bengaliSpeaker }?.second ?: "Bengali speaker $bengaliSpeaker" else selectedVoice?.name ?: "Default Voice"
-                    persistGeneratedAudio(text, synthesisResult.audio, sampleRate, voiceName, selectedVoice?.voiceId, synthesisResult.timeMillis)
+                    _uiState.update { it.copy(status = "Saving voice note") }
+                    val saved = runCatching {
+                        persistGeneratedAudio(text, synthesisResult.audio, sampleRate, voiceName, selectedVoice?.voiceId, synthesisResult.timeMillis)
+                    }
+                    currentGeneration = saved.getOrNull()
                     _uiState.update {
                         it.copy(
                             busy = false,
@@ -633,6 +641,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             status = if (bengaliSelected) "Bengali speech ready" else "Speech ready",
                             sampleRate = sampleRate,
                             sampleCount = synthesisResult.audio.size,
+                            currentGenerationId = currentGeneration?.generationId,
                             synthesisMillis = synthesisResult.timeMillis,
                             tokenizeMillis = synthesisResult.tokenizeMillis,
                             encodeMillis = synthesisResult.encodeMillis,
@@ -643,7 +652,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             decodeGraphComputeMillis = synthesisResult.decodeGraphComputeMillis,
                             estimatedSynthesisMillis = null,
                             estimateSampleCount = 0,
-                            error = null,
+                            error = if (saved.isFailure) "Audio was generated, but could not be saved. Please check available storage." else null,
                         )
                     }
                     playAudio()
@@ -763,10 +772,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             loaded.onSuccess { wav ->
                 stopAudio()
                 generatedAudio = wav.samples
+                currentGeneration = generation
                 _uiState.update {
                     it.copy(
                         sampleRate = wav.sampleRate,
                         sampleCount = wav.samples.size,
+                        currentGenerationId = generation.generationId,
                         status = "Speech ready",
                         error = null,
                     )
@@ -782,8 +793,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             dao.deleteGeneration(generation)
             runCatching { File(generation.wavPath).delete() }
+            if (currentGeneration?.generationId == generation.generationId) {
+                currentGeneration = null
+                _uiState.update { it.copy(currentGenerationId = null) }
+            }
         }
     }
+
+    fun currentGenerationForActions(): GenerationEntity? = currentGeneration
 
     fun playAudio(historyGenerationId: Long? = null) {
         val samples = generatedAudio ?: return
@@ -918,6 +935,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         resetSynthesis: Boolean = false,
         synthesisEstimate: GenerationTimeEstimate? = null,
     ) {
+        if (resetSynthesis) currentGeneration = null
         operationTickerJob?.cancel()
         val start = SystemClock.elapsedRealtime()
         _uiState.update {
@@ -929,6 +947,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 operationElapsedMillis = 0L,
                 synthesisFrames = if (resetSynthesis) 0 else it.synthesisFrames,
                 sampleCount = if (resetSynthesis) 0 else it.sampleCount,
+                currentGenerationId = if (resetSynthesis) null else it.currentGenerationId,
                 synthesisMillis = if (resetSynthesis) 0 else it.synthesisMillis,
                 tokenizeMillis = if (resetSynthesis) 0 else it.tokenizeMillis,
                 encodeMillis = if (resetSynthesis) 0 else it.encodeMillis,
@@ -1339,29 +1358,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun persistGeneratedAudio(
+    private suspend fun persistGeneratedAudio(
         text: String,
         samples: FloatArray,
         sampleRate: Int,
         voiceName: String,
         voiceId: String?,
         synthesisMillis: Long,
-    ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            generationDir.mkdirs()
-            val file = File(generationDir, "generation-${System.currentTimeMillis()}.wav")
+    ): GenerationEntity = withContext(Dispatchers.IO) {
+        generationDir.mkdirs()
+        val file = File(generationDir, "generation-${System.currentTimeMillis()}.wav")
+        try {
             file.outputStream().use { writeWav(it, samples, sampleRate) }
-            dao.insertGeneration(
-                GenerationEntity(
-                    text = text,
-                    voiceId = voiceId,
-                    voiceName = voiceName,
-                    wavPath = file.absolutePath,
-                    sampleRate = sampleRate,
-                    sampleCount = samples.size,
-                    synthesisMillis = synthesisMillis,
-                ),
+            val generation = GenerationEntity(
+                text = text,
+                voiceId = voiceId,
+                voiceName = voiceName,
+                wavPath = file.absolutePath,
+                sampleRate = sampleRate,
+                sampleCount = samples.size,
+                synthesisMillis = synthesisMillis,
             )
+            generation.copy(generationId = dao.insertGeneration(generation))
+        } catch (error: Exception) {
+            file.delete()
+            throw error
         }
     }
 
@@ -1643,7 +1664,18 @@ private fun SetupScreen(viewModel: MainViewModel, onStart: (Boolean) -> Unit) {
 private fun StudioScreen(viewModel: MainViewModel) {
     val state by viewModel.uiState.collectAsState()
     val voices by viewModel.voices.collectAsState()
+    val context = LocalContext.current
     var showVoicePicker by remember { mutableStateOf(false) }
+    var pendingExport by remember { mutableStateOf<GenerationEntity?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("audio/wav"),
+    ) { uri ->
+        val generation = pendingExport
+        pendingExport = null
+        if (uri != null && generation != null) {
+            viewModel.exportGenerationToUri(generation, uri)
+        }
+    }
     val bengaliSelected = state.selectedModelId == BengaliModel.id
     val selectedVoiceName = if (bengaliSelected) bengaliSpeakerOptions.firstOrNull { it.first == state.selectedBengaliSpeakerId }?.second ?: "Bengali voice"
     else voices.firstOrNull { it.voiceId == state.selectedVoiceId }?.name ?: "Default Voice"
@@ -1681,6 +1713,31 @@ private fun StudioScreen(viewModel: MainViewModel) {
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text("Text to speech", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            if ((state.busy && !state.downloading) || state.sampleCount > 0) {
+                ResultPanel(
+                    state = state,
+                    onPlay = viewModel::playAudio,
+                    onStop = viewModel::stopAudio,
+                    onSave = {
+                        viewModel.currentGenerationForActions()?.let { generation ->
+                            pendingExport = generation
+                            exportLauncher.launch(viewModel.suggestedExportFileName(generation))
+                        }
+                    },
+                    onShare = {
+                        viewModel.currentGenerationForActions()?.let { generation ->
+                            runCatching { shareGeneration(context, generation) }
+                                .onFailure { throwable ->
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        throwable.message ?: "Could not share audio",
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                        }
+                    },
+                )
+            }
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Speech language", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -1719,13 +1776,6 @@ private fun StudioScreen(viewModel: MainViewModel) {
                 onLanguageChange = viewModel::updateLanguage,
                 onTranslateEnglishChange = viewModel::setTranslateEnglishToBengali,
             )
-            if ((state.busy && !state.downloading) || state.sampleCount > 0) {
-                ResultPanel(
-                    state = state,
-                    onPlay = viewModel::playAudio,
-                    onStop = viewModel::stopAudio,
-                )
-            }
         }
 
         Surface(
@@ -2303,7 +2353,13 @@ private fun RuntimePanel(
 }
 
 @Composable
-private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () -> Unit) {
+private fun ResultPanel(
+    state: QwenTtsUiState,
+    onPlay: () -> Unit,
+    onStop: () -> Unit,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+) {
     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (state.busy && !state.downloading) {
@@ -2311,6 +2367,7 @@ private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () ->
                 GenerationStats(state)
             } else {
                 if (state.sampleCount > 0 && state.sampleRate > 0) {
+                    Text("Your voice note is ready", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
                         "Audio ${formatSeconds(state.sampleCount.toDouble() / state.sampleRate.toDouble())} · generated in ${formatDuration(state.synthesisMillis)}",
                         style = MaterialTheme.typography.bodySmall,
@@ -2331,6 +2388,20 @@ private fun ResultPanel(state: QwenTtsUiState, onPlay: () -> Unit, onStop: () ->
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(if (state.playing) "Stop" else "Play")
+                }
+                if (state.currentGenerationId != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = onSave, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Save WAV")
+                        }
+                        OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Share")
+                        }
+                    }
                 }
             }
         }
