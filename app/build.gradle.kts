@@ -18,23 +18,31 @@ val qwenOpencl = providers.gradleProperty("qwen.opencl")
     .orElse(false)
 val qwenOpenclSdkDir = providers.gradleProperty("qwen.opencl.sdkDir")
     .orElse(layout.projectDirectory.dir("../build/opencl-sdk").asFile.absolutePath)
-val generatedOpenmpJniLibs = layout.buildDirectory.dir("generated/openmpJniLibs")
+val qwenNdkVersion = "27.2.12479018"
+val generatedNativeJniLibs = layout.buildDirectory.dir("generated/nativeJniLibs")
 
-val copyOpenmpLibs by tasks.registering {
+val copyNativeRuntimeLibs by tasks.registering {
     val sdkDir = providers.environmentVariable("ANDROID_HOME")
         .orElse(providers.environmentVariable("ANDROID_SDK_ROOT"))
         .orElse("${System.getProperty("user.home")}\\AppData\\Local\\Android\\Sdk")
     inputs.property("qwenOpenmp", qwenOpenmp)
-    outputs.dir(generatedOpenmpJniLibs)
+    outputs.dir(generatedNativeJniLibs)
     doLast {
-        delete(generatedOpenmpJniLibs)
+        delete(generatedNativeJniLibs)
+        val cxxRuntime = fileTree("${sdkDir.get()}/ndk/$qwenNdkVersion") {
+            include("**/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so")
+        }.singleFile
+        copy {
+            from(cxxRuntime)
+            into(generatedNativeJniLibs.get().dir("arm64-v8a"))
+        }
         if (qwenOpenmp.get()) {
             val libomp = fileTree("${sdkDir.get()}/ndk") {
                 include("**/toolchains/llvm/prebuilt/*/lib/clang/*/lib/linux/aarch64/libomp.so")
             }.singleFile
             copy {
                 from(libomp)
-                into(generatedOpenmpJniLibs.get().dir("arm64-v8a"))
+                into(generatedNativeJniLibs.get().dir("arm64-v8a"))
             }
         }
     }
@@ -43,14 +51,14 @@ val copyOpenmpLibs by tasks.registering {
 android {
     namespace = "com.qwen.tts.android"
     compileSdk = 36
-    ndkVersion = "27.2.12479018"
+    ndkVersion = qwenNdkVersion
 
     defaultConfig {
         applicationId = "com.qwen.tts.android"
         minSdk = 31
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.3.1"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -111,7 +119,7 @@ android {
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDir(generatedOpenmpJniLibs.get().asFile)
+            jniLibs.srcDir(generatedNativeJniLibs.get().asFile)
             if (qwenPrebuiltNative.get()) jniLibs.srcDir("prebuilt-native")
         }
     }
@@ -120,7 +128,7 @@ android {
 tasks.matching {
     it.name.startsWith("merge") && (it.name.endsWith("NativeLibs") || it.name.endsWith("JniLibFolders"))
 }.configureEach {
-    dependsOn(copyOpenmpLibs)
+    dependsOn(copyNativeRuntimeLibs)
 }
 
 kotlin {

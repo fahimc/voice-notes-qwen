@@ -277,6 +277,8 @@ data class QwenTtsUiState(
     val translatedText: String? = null,
     val activeBackendName: String? = null,
     val modelReady: Boolean = false,
+    val qwenInstalled: Boolean = false,
+    val bengaliInstalled: Boolean = false,
     val loaded: Boolean = false,
     val setupComplete: Boolean = false,
     val busy: Boolean = false,
@@ -318,9 +320,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val voiceDir = File(application.filesDir, "voices")
     private val generationDir = File(application.filesDir, "generations")
     private val preferences = application.getSharedPreferences("voice-notes-settings", Application.MODE_PRIVATE)
-    private val initialModelId = preferences.getString("speech-model", QwenModel.defaultVariant.id)
+    private val savedModelId = preferences.getString("speech-model", QwenModel.defaultVariant.id)
         ?.takeIf { saved -> speechModelOptions.any { it.first == saved } }
         ?: QwenModel.defaultVariant.id
+    private val initialModelId = if (isModelReady(QwenModel.defaultVariant)) savedModelId else QwenModel.defaultVariant.id
     private val dao = QwenDatabase.getDatabase(application).qwenDao()
     private val recorder = VoiceRecorder()
 
@@ -332,6 +335,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         QwenTtsUiState(
             selectedModelId = initialModelId,
             modelReady = isSelectedModelReady(initialModelId),
+            qwenInstalled = isModelReady(QwenModel.defaultVariant),
+            bengaliInstalled = isSelectedModelReady(BengaliModel.id),
             downloadTotalBytes = selectedModelBytes(initialModelId),
         ),
     )
@@ -346,9 +351,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var activeTrack: AudioTrack? = null
 
     init {
+        if (initialModelId != savedModelId) {
+            preferences.edit().putString("speech-model", initialModelId).apply()
+        }
         val threads = preferredCpuThreadCount()
         _uiState.update { it.copy(selectedCpuThreads = threads, cpuThreads = threads) }
         refreshModelState()
+        startSetup()
     }
 
     fun updateText(value: String) {
@@ -408,6 +417,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 activeBackendName = null,
                 modelReady = ready,
+                qwenInstalled = isModelReady(QwenModel.defaultVariant),
+                bengaliInstalled = isSelectedModelReady(BengaliModel.id),
                 loaded = false,
                 setupComplete = false,
                 status = if (ready) "Model ready" else "Model not downloaded",
@@ -433,6 +444,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 speakerEmbeddingDim = 0,
             )
         }
+        startSetup()
     }
 
     fun downloadModel(forceRedownload: Boolean = false) {
@@ -470,6 +482,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 onSuccess = {
                     stopBusyTicker()
                     refreshModelState("Model ready")
+                    startSetup()
                 },
                 onFailure = { throwable ->
                     stopBusyTicker()
@@ -551,8 +564,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (bengaliSelected) {
                         val startedAt = SystemClock.elapsedRealtime()
                         val speechText = if (translateEnglish) {
+                            _uiState.update { it.copy(status = "Preparing English to Bengali translation") }
+                            val translator = ensureBengaliTranslator()
+                            translator.prepare()
                             _uiState.update { it.copy(status = "Translating English to Bengali") }
-                            ensureBengaliTranslator().translate(text)
+                            translator.translate(text)
                         } else text
                         _uiState.update { it.copy(translatedText = if (translateEnglish) speechText else null, status = "Generating Bengali speech") }
                         val output = ensureBengaliEngineLoaded().synthesize(speechText, bengaliSpeaker)
@@ -974,6 +990,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 modelReady = ready,
+                qwenInstalled = isModelReady(QwenModel.defaultVariant),
+                bengaliInstalled = isSelectedModelReady(BengaliModel.id),
                 busy = false,
                 downloading = false,
                 downloadTotalBytes = selectedModelBytes(modelId),
@@ -1193,6 +1211,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         modelReady = true,
+                        qwenInstalled = isModelReady(QwenModel.defaultVariant),
+                        bengaliInstalled = isSelectedModelReady(BengaliModel.id),
                         busy = false,
                         downloading = false,
                         downloadBytes = selectedModelBytes(modelId),
@@ -1208,8 +1228,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.IO) {
                     if (bengaliSelected) {
                         ensureBengaliEngineLoaded()
-                        _uiState.update { it.copy(status = "Downloading English to Bengali translation model") }
-                        ensureBengaliTranslator().prepare()
                         "CPU" to _uiState.value.selectedCpuThreads
                     } else {
                         val native = ensureEngineLoaded(variant)
@@ -1227,6 +1245,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             downloading = false,
                             loaded = true,
                             setupComplete = true,
+                            qwenInstalled = isModelReady(QwenModel.defaultVariant),
+                            bengaliInstalled = isSelectedModelReady(BengaliModel.id),
                             status = if (bengaliSelected) "Bengali speech is ready" else if (backend.isBlank()) "Ready to create your voice" else "Loaded on $backend",
                             activeBackendName = backend.ifBlank { null },
                             cpuThreads = threads,
@@ -1245,7 +1265,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             setupComplete = false,
                             modelReady = isSelectedModelReady(modelId),
                             status = "Model setup failed",
-                            error = "${throwable.message ?: "Could not load the model"} You can re-download the model and retry.",
+                            error = friendlySetupError(throwable),
                         )
                     }
                 },
@@ -1438,7 +1458,7 @@ private fun QwenTtsApp(viewModel: MainViewModel = viewModel()) {
 
     LaunchedEffect(state.setupComplete, currentRoute) {
         if (state.setupComplete && currentRoute == AppDestination.Setup.route) {
-            navController.navigate(AppDestination.Voices.route) {
+            navController.navigate(AppDestination.Studio.route) {
                 popUpTo(AppDestination.Setup.route) { inclusive = true }
                 launchSingleTop = true
             }
@@ -1499,7 +1519,6 @@ private fun QwenTtsApp(viewModel: MainViewModel = viewModel()) {
                 SetupScreen(
                     viewModel = viewModel,
                     onStart = viewModel::startSetup,
-                    onModelChange = viewModel::selectModel,
                 )
             }
             composable(AppDestination.Studio.route) {
@@ -1522,7 +1541,7 @@ private fun destinationIndex(route: String?): Int =
     appDestinations.indexOfFirst { it.route == route }.takeIf { it >= 0 } ?: 0
 
 @Composable
-private fun SetupScreen(viewModel: MainViewModel, onStart: (Boolean) -> Unit, onModelChange: (String) -> Unit) {
+private fun SetupScreen(viewModel: MainViewModel, onStart: (Boolean) -> Unit) {
     val state by viewModel.uiState.collectAsState()
     val bengaliSelected = state.selectedModelId == BengaliModel.id
 
@@ -1540,41 +1559,33 @@ private fun SetupScreen(viewModel: MainViewModel, onStart: (Boolean) -> Unit, on
             modifier = Modifier.size(48.dp),
             tint = MaterialTheme.colorScheme.primary,
         )
-        Text("Let’s set up Voice Notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+        Text(
+            if (state.modelReady) "Getting voices ready" else "Welcome to Voice Notes",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+        )
         Text(
             if (bengaliSelected) {
-                "Start once to install the Bengali voices and English to Bengali translation. Then choose a voice."
+                "Opening your Bengali voices. Your installed models stay on this phone."
             } else {
-                "Start once to download and load the speech model. When setup finishes, you’ll go straight to the voice creation screen."
+                "We’re setting up Qwen automatically so you can create voice notes. This download happens only once."
             },
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Choose a speech model", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            speechModelOptions.forEach { (id, label) ->
-                FilterChip(
-                    selected = state.selectedModelId == id,
-                    onClick = { onModelChange(id) },
-                    enabled = !state.busy,
-                    label = { Text(label) },
-                )
-            }
-        }
 
         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Text(if (bengaliSelected) "Bengali text to speech" else "Speech model", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text(speechModelOptions.first { it.first == state.selectedModelId }.second, style = MaterialTheme.typography.bodyLarge)
+                Text(if (bengaliSelected) "Bengali voices" else "Qwen voice notes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(if (state.modelReady) "Installed on this device" else "Installing on this device", style = MaterialTheme.typography.bodyLarge)
                 Text(
                     if (bengaliSelected) {
-                        "About 95 MB speech model plus a small on-device translation model • 16 Bengali speakers • no voice cloning"
+                        "Male and female voices, with optional English to Bengali translation."
                     } else {
-                        "About 0.8 GB • downloads to this device • voice cloning available"
+                        "About 0.8 GB. You can add Bengali voices later in Settings."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1609,18 +1620,18 @@ private fun SetupScreen(viewModel: MainViewModel, onStart: (Boolean) -> Unit, on
             Text(message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
         }
 
-        Button(
-            onClick = { onStart(state.error != null && state.modelReady) },
-            enabled = !state.busy,
-            modifier = Modifier.fillMaxWidth().height(54.dp),
-        ) {
-            Icon(Icons.Default.Download, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(if (state.error != null && state.modelReady) "Re-download & retry" else "Start setup")
+        if (state.error != null) {
+            Button(
+                onClick = { onStart(false) },
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth().height(54.dp),
+            ) {
+                Text("Try again")
+            }
         }
 
         Text(
-            "The model is downloaded only once. You can use the app offline after setup completes.",
+            "Your models stay installed after app updates. You can use installed voices offline.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1670,6 +1681,32 @@ private fun StudioScreen(viewModel: MainViewModel) {
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text("Text to speech", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Speech language", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = !bengaliSelected,
+                            onClick = { viewModel.selectModel(QwenModel.defaultVariant.id) },
+                            enabled = !state.busy,
+                            label = { Text("Qwen") },
+                        )
+                        FilterChip(
+                            selected = bengaliSelected,
+                            onClick = { viewModel.selectModel(BengaliModel.id) },
+                            enabled = !state.busy,
+                            label = { Text("Bengali") },
+                        )
+                    }
+                    if (!state.bengaliInstalled) {
+                        Text("Bengali is optional. Choose it to install voices once.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (state.busy && state.downloading) {
+                        LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                        Text("${state.status} · ${(state.downloadProgress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
             state.error?.let { error ->
                 Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
@@ -1968,8 +2005,7 @@ private fun SettingsScreen(viewModel: MainViewModel) {
         ModelPanel(
             state = state,
             onModelChange = viewModel::selectModel,
-            onDownload = viewModel::downloadModel,
-            onLoad = viewModel::loadModel,
+            onRetry = { viewModel.startSetup() },
         )
         RuntimePanel(
             state = state,
@@ -2034,7 +2070,7 @@ private fun ComposerPanel(
                     )
                 }
                 if (state.translateEnglishToBengali) {
-                    Text("English text is translated on this device before speech generation. Translation by Google.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("English text is translated on this device before speech generation. The small translation model downloads the first time you use this option.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     state.translatedText?.let { translated -> Text(translated, style = MaterialTheme.typography.bodyMedium) }
                 }
             }
@@ -2187,59 +2223,50 @@ private fun LanguageDropdown(
 private fun ModelPanel(
     state: QwenTtsUiState,
     onModelChange: (String) -> Unit,
-    onDownload: (Boolean) -> Unit,
-    onLoad: () -> Unit,
+    onRetry: () -> Unit,
 ) {
-    val bengaliSelected = state.selectedModelId == BengaliModel.id
-    val modelLabel = speechModelOptions.firstOrNull { it.first == state.selectedModelId }?.second ?: QwenModel.defaultVariant.displayName
-    val modelBytes = if (bengaliSelected) BengaliModel.estimatedBytes else QwenModel.defaultVariant.totalBytes
     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Speech model", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            speechModelOptions.forEach { (id, label) ->
-                FilterChip(
-                    selected = state.selectedModelId == id,
-                    onClick = { onModelChange(id) },
-                    enabled = !state.busy,
-                    label = { Text(label) },
-                )
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.GraphicEq, contentDescription = null)
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(modelLabel, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "${formatBytes(modelBytes)} model package${if (bengaliSelected) " · no cloning" else " · cloning"}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            Text("Installed voices", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Qwen is included in the first-time setup. Add Bengali whenever you like, then switch without downloading again.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            listOf(
+                Triple(QwenModel.defaultVariant.id, "Qwen · voice cloning", state.qwenInstalled),
+                Triple(BengaliModel.id, "Bengali · male and female", state.bengaliInstalled),
+            ).forEach { (id, title, installed) ->
+                val active = state.selectedModelId == id
+                ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            when {
+                                active && state.loaded -> "In use · available offline"
+                                active && state.busy -> "Getting ready"
+                                installed -> "Installed · available offline"
+                                id == BengaliModel.id -> "Optional · about 95 MB"
+                                else -> "About 0.8 GB · installing automatically"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (!active) {
+                            OutlinedButton(onClick = { onModelChange(id) }, enabled = !state.busy) {
+                                Text(if (installed) "Switch to ${if (id == BengaliModel.id) "Bengali" else "Qwen"}" else "Install Bengali voices")
+                            }
+                        }
+                    }
                 }
-                AssistChip(onClick = {}, label = { Text(if (state.modelReady) "Ready" else "Missing") })
             }
-
-            if (state.downloading) {
-                LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
-                Text("${formatBytes(state.downloadBytes)} / ${formatBytes(state.downloadTotalBytes)}", style = MaterialTheme.typography.bodySmall)
+            if (state.busy) {
+                if (state.downloading) {
+                    LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                Text(state.status, style = MaterialTheme.typography.bodySmall)
             }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = { onDownload(state.modelReady) },
-                    enabled = !state.busy,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (state.modelReady) "Re-download" else "Download model")
-                }
-                OutlinedButton(
-                    onClick = onLoad,
-                    enabled = state.modelReady && !state.loaded && !state.busy,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (state.loaded) "Loaded" else "Load")
-                }
+            state.error?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                Button(onClick = onRetry, enabled = !state.busy) { Text("Try again") }
             }
         }
     }
@@ -2423,6 +2450,12 @@ private fun formatDate(epochMillis: Long): String {
 
 private fun backendOptionById(id: String): BackendOption =
     backendOptions.firstOrNull { it.id == id } ?: defaultBackendOption
+
+private fun friendlySetupError(error: Throwable): String = when {
+    error is UnsatisfiedLinkError || error.message.orEmpty().contains("dlopen failed", ignoreCase = true) ->
+        "A required audio component is missing from this app build. Update the app and try again. Your downloaded voices are safe."
+    else -> "The speech model could not start. Try again; the app will reuse any files already on your phone."
+}
 
 private fun OutputStream.writeAscii(value: String) {
     write(value.toByteArray(Charsets.US_ASCII))

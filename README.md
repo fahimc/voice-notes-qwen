@@ -9,7 +9,7 @@ An Android app for recording a voice sample, creating a local voice profile, and
 - Listen to results, then find them later in History.
 - Share a WAV through Android's share sheet (including WhatsApp when installed), or save it with Android's file picker.
 - Download and run the model locally; synthesis does not upload your text or voice recordings.
-- Choose between Qwen voice cloning and a 16-speaker Bengali voice model during setup.
+- Qwen voice cloning installs automatically on first launch. Add the optional 16-speaker Bengali voice model from Studio or Settings and switch between installed models without downloading them again.
 - Choose male or female Bengali voices, or pick from the other built-in Bengali speakers.
 - Enter Bengali directly or translate English to Bengali on-device before speech generation.
 
@@ -20,9 +20,9 @@ The default option is **Qwen3-TTS 0.6B Base Q4_K_M** through [`qwen3-tts.cpp`](h
 - `qwen-talker-0.6b-base-Q4_K_M.gguf`
 - `qwen-tokenizer-12hz-Q4_K_M.gguf`
 
-The two files total about 884 MB and are downloaded from [Serveurperso/Qwen3-TTS-GGUF](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF) to app-private storage on first setup. This model supports voice cloning.
+The two files total about 884 MB and are downloaded from [Serveurperso/Qwen3-TTS-GGUF](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF) to app-private storage on first launch. This model supports voice cloning. Installed model files are reused on later launches and app updates.
 
-The optional Bengali model is [Mimic 3 Bengali multi-speaker VITS](https://huggingface.co/csukuangfj/vits-mimic3-bn-multi_low), run locally with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It provides 16 built-in speaker IDs, including female and male choices in the app. It does not support voice cloning. If Bengali is selected, setup downloads and installs the speech model and the roughly 30 MB [Google ML Kit on-device English to Bengali translation model](https://developers.google.com/ml-kit/language/translation/android). Speech and translation run on the phone after setup. The APK does not bundle model weights. Ensure the phone has enough free storage and memory before downloading and loading either model.
+The optional Bengali model is [Mimic 3 Bengali multi-speaker VITS](https://huggingface.co/csukuangfj/vits-mimic3-bn-multi_low), run locally with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It provides 16 built-in speaker IDs, including female and male choices in the app. It does not support voice cloning. Choosing Bengali installs it once. If you use English-to-Bengali translation, the roughly 30 MB [Google ML Kit on-device model](https://developers.google.com/ml-kit/language/translation/android) downloads on first use. Speech and translation run on the phone after their models are installed. The APK does not bundle model weights. Ensure the phone has enough free storage and memory before downloading and loading either model.
 
 ## Requirements
 
